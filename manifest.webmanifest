@@ -1,19 +1,32 @@
 {
+  "id": "/",
   "name": "Room Wallet",
-  "short_name": "Room Wallet",
-  "description": "Simple room wallet and UPI expense tracker",
-  "start_url": "./index.html",
-  "scope": "./",
+  "short_name": "RoomWallet",
+  "description": "Personal and shared room expense tracker with UPI helpers.",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0b1220",
-  "theme_color": "#0b1220",
+  "background_color": "#0D1722",
+  "theme_color": "#0B7A6B",
   "icons": [
     {
-      "src": "icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

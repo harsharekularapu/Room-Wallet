@@ -36,3 +36,12 @@ DATA & SECURITY NOTES
 - Use HTTPS in production. Do not use a public shared password.
 - This is a shared expense tracker, not a bank account or payment processor. UPI transfers happen only in the selected UPI app.
 - Browser camera permissions and QR support vary by device. If scanning is unavailable, enter the UPI ID manually.
+
+
+PWA INSTALL FIX (2026-11-04)
+- Static manifest.webmanifest now references real PNG icons at /icon-192.png and /icon-512.png.
+- index.html uses the static manifest and static PNG app icons; it no longer replaces the manifest with a Blob URL.
+- Service worker cache version bumped to room-wallet-v4 and pre-caches both PNG icons.
+- server.js serves PNG files with image/png content type.
+- After updating GitHub, wait for Render auto-deploy to finish, then in Chrome open the site, clear the site's cached data / unregister old service worker if needed, and reload.
+- Chrome install availability is ultimately determined by the browser/device; test from Chrome menu > Install app or Add to Home screen.
