@@ -1,0 +1,5 @@
+node_modules/
+roomwallet-v3.json
+test-db.json
+*.tmp
+.env

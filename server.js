@@ -1,176 +1,32 @@
 'use strict';
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || '0.0.0.0';
-const DB = process.env.ROOM_WALLET_DB || path.join(__dirname, 'room-wallet-db.json');
-const MAX_BODY = 8 * 1024 * 1024;
-const SESSION_TTL = 24 * 60 * 60 * 1000;
-const sessions = new Map();
-
-function readDB() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(DB, 'utf8'));
-    return parsed && parsed.accounts && typeof parsed.accounts === 'object' ? parsed : { accounts: {} };
-  } catch (_) { return { accounts: {} }; }
-}
-function writeDB(next) {
-  const tmp = DB + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, DB);
-}
-let db = readDB();
-function hashPassword(password, salt) { return crypto.scryptSync(password, salt, 32); }
-function safeEqual(a, b) { return a.length === b.length && crypto.timingSafeEqual(a, b); }
-function makeToken() { return crypto.randomBytes(32).toString('hex'); }
-function send(res, status, data) {
-  const body = JSON.stringify(data);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-    'Content-Length': Buffer.byteLength(body)
-  });
-  res.end(body);
-}
-function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '', tooLarge = false;
-    req.on('data', chunk => {
-      if (tooLarge) return;
-      body += chunk;
-      if (Buffer.byteLength(body) > MAX_BODY) { tooLarge = true; reject(Object.assign(new Error('Request too large'), { status: 413 })); }
-    });
-    req.on('end', () => {
-      if (tooLarge) return;
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch (_) { reject(Object.assign(new Error('Invalid JSON body'), { status: 400 })); }
-    });
-    req.on('error', reject);
-  });
-}
-function accountKey(value) { return String(value || '').trim().normalize('NFKC').toLowerCase(); }
-function normalizeMembers(members) {
-  if (!Array.isArray(members)) return [];
-  const seen = new Set();
-  return members.slice(0, 10).map((member, i) => {
-    const name = String(member && member.name || '').trim().slice(0, 60);
-    const id = String(member && member.id || ('m' + i)).slice(0, 80);
-    const normalized = name.toLocaleLowerCase();
-    if (!name || seen.has(normalized)) return null;
-    seen.add(normalized);
-    return { id, name };
-  }).filter(Boolean);
-}
-function normalizeState(state, authoritativeMembers) {
-  if (!state || typeof state !== 'object' || Array.isArray(state)) throw Object.assign(new Error('Invalid state'), { status: 400 });
-  const wallets = Array.isArray(state.wallets) ? state.wallets.slice(0, 200) : [];
-  const tx = Array.isArray(state.tx) ? state.tx.slice(-20000) : [];
-  const hist = Array.isArray(state.hist) ? state.hist.slice(-24) : [];
-  for (const wallet of wallets) {
-    if (!wallet || typeof wallet.id !== 'string' || typeof wallet.name !== 'string') throw Object.assign(new Error('Invalid wallet data'), { status: 400 });
-  }
-  const walletIds = new Set(wallets.map(w => w.id));
-  for (const item of tx) {
-    if (!item || typeof item.w !== 'string' || !walletIds.has(item.w) || !Number.isFinite(Number(item.amt)) || Number(item.amt) < 0 || !Number.isFinite(Number(item.t)) || !['add', 'spend'].includes(item.type)) {
-      throw Object.assign(new Error('Invalid transaction data'), { status: 400 });
-    }
-  }
-  return {
-    wallets, tx,
-    members: authoritativeMembers,
-    hist,
-    month: typeof state.month === 'string' ? state.month.slice(0, 10) : null,
-    updated: Number.isFinite(Number(state.updated)) ? Number(state.updated) : Date.now()
-  };
-}
-function getSession(req) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const session = sessions.get(token);
-  if (!session) return null;
-  if (session.expiresAt <= Date.now()) { sessions.delete(token); return null; }
-  return session;
-}
-function samePassword(password, account) {
-  const actual = hashPassword(password, account.salt);
-  const expected = Buffer.from(account.passwordHash, 'hex');
-  return safeEqual(actual, expected);
-}
-
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-  try {
-    if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ok: true, service: 'Room Wallet Sync', version: 2 });
-
-    if (req.method === 'POST' && url.pathname === '/api/sync') {
-      const input = await parseBody(req);
-      const key = accountKey(input.account);
-      const password = String(input.password || '');
-      if (key.length < 2 || key.length > 80 || password.length < 4 || password.length > 200) return send(res, 400, { error: 'Enter a room name and a password of at least 4 characters.' });
-      const mode = String(input.mode || 'auto');
-      if (!['auto', 'create', 'join'].includes(mode)) return send(res, 400, { error: 'Invalid room action.' });
-      let account = db.accounts[key];
-      if (!account && mode === 'join') return send(res, 404, { error: 'Room not found. Check the room name or create a new room.' });
-      if (account && mode === 'create') return send(res, 409, { error: 'This room already exists. Choose Join room.' });
-      if (!account) {
-        const members = normalizeMembers(input.members);
-        if (!members.length) return send(res, 400, { error: 'Add at least one unique member before creating a room.' });
-        const salt = crypto.randomBytes(16).toString('hex');
-        const state = normalizeState(input.state || {}, members);
-        account = { account: key, displayName: String(input.account).trim().slice(0, 80), salt, passwordHash: hashPassword(password, salt).toString('hex'), members, state };
-        const next = { ...db, accounts: { ...db.accounts, [key]: account } };
-        writeDB(next); db = next;
-      } else if (!samePassword(password, account)) {
-        return send(res, 401, { error: 'Wrong room name or password.' });
-      }
-      const token = makeToken();
-      sessions.set(token, { key, expiresAt: Date.now() + SESSION_TTL });
-      return send(res, 200, { ok: true, token, members: account.members, state: account.state, accountName: account.displayName });
-    }
-
-    const session = getSession(req);
-    if (req.method === 'GET' && url.pathname === '/api/state') {
-      if (!session) return send(res, 401, { error: 'Session expired. Sign in again.' });
-      const account = db.accounts[session.key];
-      if (!account) return send(res, 404, { error: 'Room not found.' });
-      return send(res, 200, { state: account.state, members: account.members });
-    }
-    if (req.method === 'PUT' && url.pathname === '/api/state') {
-      if (!session) return send(res, 401, { error: 'Session expired. Sign in again.' });
-      const input = await parseBody(req);
-      const account = db.accounts[session.key];
-      if (!account) return send(res, 404, { error: 'Room not found.' });
-      const incoming = normalizeState(input.state, account.members);
-      if (incoming.updated < Number(account.state.updated || 0)) {
-        return send(res, 200, { ok: true, conflict: true, state: account.state, members: account.members });
-      }
-      const nextAccount = { ...account, state: incoming };
-      const next = { ...db, accounts: { ...db.accounts, [session.key]: nextAccount } };
-      writeDB(next); db = next;
-      return send(res, 200, { ok: true, updated: incoming.updated });
-    }
-
-    if (url.pathname.startsWith('/api/')) return send(res, 404, { error: 'API route not found.' });
-    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed.' });
-    let pathname;
-    try { pathname = decodeURIComponent(url.pathname); } catch (_) { return send(res, 400, { error: 'Invalid path.' }); }
-    const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-    const root = path.resolve(__dirname);
-    const file = path.resolve(root, relative);
-    if (file !== root && !file.startsWith(root + path.sep)) return send(res, 403, { error: 'Forbidden.' });
-    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, { error: 'Not found.' });
-    const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
-    res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': path.basename(file) === 'index.html' ? 'no-cache' : 'public, max-age=300', 'X-Content-Type-Options': 'nosniff' });
-    if (req.method === 'HEAD') return res.end();
-    fs.createReadStream(file).pipe(res);
-  } catch (error) {
-    if (!res.headersSent) send(res, error.status || 500, { error: error.status ? error.message : 'Server error.' });
-    else res.destroy();
-    if (!error.status) console.error(error);
-  }
-});
-server.listen(PORT, HOST, () => console.log(`Room Wallet Sync listening on ${HOST}:${PORT}`));
+const http=require('http'),fs=require('fs'),path=require('path'),crypto=require('crypto');
+const PORT=Number(process.env.PORT||3000),HOST=process.env.HOST||'0.0.0.0',DB=process.env.ROOM_WALLET_DB||path.join(__dirname,'roomwallet-v3.json');
+const sessions=new Map();let pool=null,db={users:{},rooms:{},invites:{}};
+function read(){try{const x=JSON.parse(fs.readFileSync(DB,'utf8'));return {...db,...x}}catch{return db}}
+async function init(){if(process.env.DATABASE_URL){const {Pool}=require('pg');pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.PGSSL==='false'?false:{rejectUnauthorized:false},max:5});await pool.query('CREATE TABLE IF NOT EXISTS roomwallet_v3_store(id smallint primary key check(id=1),data jsonb not null,updated_at timestamptz not null default now())');const r=await pool.query('SELECT data FROM roomwallet_v3_store WHERE id=1');if(r.rowCount)db=r.rows[0].data;else await pool.query('INSERT INTO roomwallet_v3_store(id,data) VALUES(1,$1::jsonb) ON CONFLICT(id) DO NOTHING',[JSON.stringify(db)]);console.log('PostgreSQL persistence connected')}else{db=read();console.warn('WARNING: using local JSON storage; configure DATABASE_URL for durable hosting')}}
+async function save(){if(pool)await pool.query('INSERT INTO roomwallet_v3_store(id,data,updated_at) VALUES(1,$1::jsonb,now()) ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,updated_at=now()',[JSON.stringify(db)]);const t=DB+'.tmp';fs.writeFileSync(t,JSON.stringify(db),{mode:0o600});fs.renameSync(t,DB)}
+const hash=(p,s)=>crypto.scryptSync(p,s,32).toString('hex'),id=(n=9)=>crypto.randomBytes(n).toString('base64url');
+const clean=s=>String(s||'').trim(),emailKey=s=>clean(s).toLowerCase();
+function send(res,status,obj){const b=JSON.stringify(obj);res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','content-length':Buffer.byteLength(b)});res.end(b)}
+function body(req){return new Promise((ok,no)=>{let s='';req.on('data',c=>{s+=c;if(s.length>1e6)no(Object.assign(Error('Request too large'),{status:413}))});req.on('end',()=>{try{ok(s?JSON.parse(s):{})}catch{no(Object.assign(Error('Invalid JSON'),{status:400}))}});req.on('error',no)})}
+function auth(req){const t=(req.headers.authorization||'').replace(/^Bearer /,'');const x=sessions.get(t);if(!x||x.exp<Date.now()){sessions.delete(t);return null}return x}
+function pubUser(u){return {id:u.id,accountId:u.accountId,name:u.name,email:u.email,createdAt:u.createdAt}}
+function roomFor(r,userId){return r&&r.members.some(m=>m.userId===userId)}
+function roomSummary(r){return {id:r.id,roomCode:r.roomCode,name:r.name,ownerId:r.ownerId,memberCount:r.members.length,members:r.members.map(m=>({userId:m.userId,name:db.users[m.userId]?.name,accountId:db.users[m.userId]?.accountId,role:m.role,joinedAt:m.joinedAt})),createdAt:r.createdAt}}
+function createSession(userId){const token=id(32);sessions.set(token,{userId,exp:Date.now()+10*60*1000});return token}
+async function handler(req,res){const u=new URL(req.url,'http://localhost');try{
+ if(req.method==='GET'&&u.pathname==='/api/health')return send(res,200,{ok:true,version:3,persistence:!!pool});
+ if(req.method==='POST'&&u.pathname==='/api/register'){const b=await body(req),name=clean(b.name),email=emailKey(b.email),password=String(b.password||'');if(name.length<2||name.length>60||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)||password.length<8)return send(res,400,{error:'Enter a name, valid email and password (8+ characters).'});if(Object.values(db.users).some(x=>x.email===email))return send(res,409,{error:'An account with this email already exists.'});const userId=id(),salt=id(16),accountId='RW-'+crypto.randomBytes(4).toString('hex').toUpperCase(),user={id:userId,accountId,name,email,salt,passwordHash:hash(password,salt),createdAt:Date.now(),personal:{wallets:[{id:id(),name:'My Wallet',balance:0}],transactions:[]}};db.users[userId]=user;await save();return send(res,201,{token:createSession(userId),user:pubUser(user)})}
+ if(req.method==='POST'&&u.pathname==='/api/login'){const b=await body(req),email=emailKey(b.email),p=String(b.password||''),user=Object.values(db.users).find(x=>x.email===email);if(!user||hash(p,user.salt)!==user.passwordHash)return send(res,401,{error:'Invalid email or password.'});return send(res,200,{token:createSession(user.id),user:pubUser(user)})}
+ const session=auth(req);if(!session)return send(res,401,{error:'Session expired. Please sign in again.'});const user=db.users[session.userId];if(!user)return send(res,401,{error:'Account not found.'});
+ if(req.method==='GET'&&u.pathname==='/api/me')return send(res,200,{user:pubUser(user),personal:user.personal,rooms:Object.values(db.rooms).filter(r=>roomFor(r,user.id)).map(roomSummary),invites:Object.values(db.invites).filter(i=>i.toUserId===user.id&&i.status==='pending').map(i=>({...i,roomName:db.rooms[i.roomId]?.name,fromName:db.users[i.fromUserId]?.name}))});
+ if(req.method==='PATCH'&&u.pathname==='/api/profile'){const b=await body(req),name=clean(b.name);if(name.length<2||name.length>60)return send(res,400,{error:'Name must be 2–60 characters.'});user.name=name;await save();return send(res,200,{user:pubUser(user)})}
+ if(req.method==='PUT'&&u.pathname==='/api/personal'){const b=await body(req);if(!Array.isArray(b.transactions)||b.transactions.length>10000)return send(res,400,{error:'Invalid personal wallet data.'});for(const t of b.transactions)if(!t||!Number.isFinite(Number(t.amount))||Number(t.amount)<=0||!['income','expense'].includes(t.type))return send(res,400,{error:'Invalid transaction.'});user.personal={wallets:[{id:'personal',name:'My Wallet'}],transactions:b.transactions.slice(-10000)};await save();return send(res,200,{personal:user.personal})}
+ if(req.method==='POST'&&u.pathname==='/api/rooms'){const b=await body(req),name=clean(b.name),count=Number(b.memberCount||1);if(name.length<2||name.length>60||!Number.isInteger(count)||count<1||count>100)return send(res,400,{error:'Enter a room name and member count from 1 to 100.'});const room={id:id(),roomCode:crypto.randomBytes(4).toString('hex').toUpperCase(),name,ownerId:user.id,createdAt:Date.now(),members:[{userId:user.id,role:'owner',joinedAt:Date.now()}],transactions:[],wallets:[{id:'shared',name:'Shared Wallet'}]};db.rooms[room.id]=room;await save();return send(res,201,{room:roomSummary(room),inviteCapacity:count-1})}
+ if(req.method==='POST'&&u.pathname==='/api/rooms/invite'){const b=await body(req),room=db.rooms[String(b.roomId||'')],accountId=clean(b.accountId).toUpperCase();if(!room||!roomFor(room,user.id))return send(res,404,{error:'Room not found or no access.'});const my=room.members.find(m=>m.userId===user.id);if(!['owner','admin'].includes(my.role))return send(res,403,{error:'Only room owners and admins can invite members.'});const target=Object.values(db.users).find(x=>x.accountId===accountId);if(!target)return send(res,404,{error:'Account ID not found.'});if(roomFor(room,target.id))return send(res,409,{error:'This user is already a room member.'});if(Object.values(db.invites).some(i=>i.roomId===room.id&&i.toUserId===target.id&&i.status==='pending'))return send(res,409,{error:'An invitation is already pending.'});const invite={id:id(),roomId:room.id,toUserId:target.id,fromUserId:user.id,status:'pending',createdAt:Date.now()};db.invites[invite.id]=invite;await save();return send(res,201,{invite:{id:invite.id,status:invite.status}})}
+ if(req.method==='POST'&&u.pathname.startsWith('/api/invites/')){const inviteId=u.pathname.split('/').pop(),b=await body(req),inv=db.invites[inviteId];if(!inv||inv.toUserId!==user.id||inv.status!=='pending')return send(res,404,{error:'Invitation not found.'});if(b.action==='accept'){const room=db.rooms[inv.roomId];if(!room)return send(res,404,{error:'Room no longer exists.'});if(!roomFor(room,user.id))room.members.push({userId:user.id,role:'member',joinedAt:Date.now()});inv.status='accepted'}else if(b.action==='decline')inv.status='declined';else return send(res,400,{error:'Choose accept or decline.'});await save();return send(res,200,{status:inv.status})}
+ const match=u.pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(.*))?$/);if(match){const room=db.rooms[match[1]],action=match[2]||'';if(!room||!roomFor(room,user.id))return send(res,404,{error:'Room not found or you are not a member.'});if(req.method==='GET'&&!action)return send(res,200,{room:roomSummary(room),transactions:room.transactions});if(req.method==='POST'&&action==='transactions'){const b=await body(req),amount=Number(b.amount);if(!Number.isFinite(amount)||amount<=0||amount>1e9||!['income','expense'].includes(b.type)||clean(b.description).length>100)return send(res,400,{error:'Invalid transaction details.'});const tx={id:id(),userId:user.id,by:user.name,type:b.type,amount,description:clean(b.description)||'Transaction',createdAt:Date.now()};room.transactions.push(tx);await save();return send(res,201,{transaction:tx})}if(req.method==='DELETE'&&action.startsWith('members/')){const targetId=action.split('/')[1],me=room.members.find(m=>m.userId===user.id);if(!['owner','admin'].includes(me.role))return send(res,403,{error:'Insufficient permission.'});if(targetId===room.ownerId)return send(res,400,{error:'Room owner cannot be removed.'});room.members=room.members.filter(m=>m.userId!==targetId);await save();return send(res,200,{ok:true})}if(req.method==='POST'&&action==='leave'){if(user.id===room.ownerId)return send(res,400,{error:'Transfer ownership before leaving this room.'});room.members=room.members.filter(m=>m.userId!==user.id);await save();return send(res,200,{ok:true})}}
+ if(req.method==='POST'&&u.pathname==='/api/logout'){for(const [k,v] of sessions)if(v.userId===user.id)sessions.delete(k);return send(res,200,{ok:true})}
+ if(u.pathname.startsWith('/api/'))return send(res,404,{error:'API route not found.'});if(!['GET','HEAD'].includes(req.method))return send(res,405,{error:'Method not allowed'});let p;try{p=decodeURIComponent(u.pathname)}catch{return send(res,400,{error:'Invalid path'})}const root=path.resolve(__dirname),file=path.resolve(root,p==='/'?'index.html':p.slice(1));if(file!==root&&!file.startsWith(root+path.sep))return send(res,403,{error:'Forbidden'});if(!fs.existsSync(file)||!fs.statSync(file).isFile())return send(res,404,{error:'Not found'});const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json','.png':'image/png','.svg':'image/svg+xml'};res.writeHead(200,{'content-type':types[path.extname(file)]||'application/octet-stream','cache-control':path.basename(file)==='index.html'?'no-cache':'public,max-age=300'});if(req.method==='HEAD')return res.end();fs.createReadStream(file).pipe(res);
+ }catch(e){console.error(e);if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'Server error.'});else res.destroy()}}
+init().then(()=>http.createServer(handler).listen(PORT,HOST,()=>console.log(`RoomWallet V3 listening on ${PORT}`))).catch(e=>{console.error(e);process.exit(1)});

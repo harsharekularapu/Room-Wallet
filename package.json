@@ -1,11 +1,1 @@
-{
-  "name": "room-wallet",
-  "version": "2.0.0",
-  "private": true,
-  "description": "Room Wallet PWA with shared room sync and UPI QR helpers",
-  "scripts": {
-    "start": "node server.js",
-    "test": "node tests/smoke.test.js"
-  },
-  "engines": { "node": ">=18" }
-}
+{"name":"roomwallet-v3","version":"3.0.0","private":true,"description":"RoomWallet multi-account, multi-room expense PWA","scripts":{"start":"node server.js","test":"node tests/regression.test.js"},"engines":{"node":">=18"},"dependencies":{"pg":"^8.13.1"}}
