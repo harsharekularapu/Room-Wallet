@@ -1,1 +1,1 @@
-{"name":"roomwallet-v3","version":"3.0.0","private":true,"description":"RoomWallet multi-account, multi-room expense PWA","scripts":{"start":"node server.js","test":"node tests/regression.test.js"},"engines":{"node":">=18"},"dependencies":{"pg":"^8.13.1"}}
+{"name":"roomwallet","version":"4.0.0","private":true,"description":"RoomWallet personal and shared room expense PWA","scripts":{"start":"node server.js","test":"node tests/regression.test.js"},"engines":{"node":">=18"},"dependencies":{"pg":"^8.13.1"}}

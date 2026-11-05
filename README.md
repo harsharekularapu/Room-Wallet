@@ -1,24 +1,28 @@
-# RoomWallet V3 — Multi-account / multi-room
+# RoomWallet V4
 
-## Features in this release
-- Individual email/password accounts with unique `RW-XXXXXXXX` Account IDs.
-- Private personal wallet per account.
-- Create multiple shared rooms; initial member count is a planning value, not a hard cap.
-- Invite existing accounts by Account ID; invitee must accept before joining.
-- Multiple memberships per account; each room has its own shared transaction ledger.
-- Owner/admin/member role model; current UI creates owner and members. Owner/admin only can invite or remove.
-- Profile settings, sign out, bottom navigation, modal close and Android/browser back handling.
-- PostgreSQL persistence using `DATABASE_URL`; local JSON fallback for development only.
-- PWA manifest, icons and service worker.
+Personal wallet + shared rooms for roommates/friends. Node 18+, PostgreSQL in production.
 
-## Deploy
-Node.js 18+. Set Build Command `npm install`, Start Command `npm start`. Configure `DATABASE_URL` with a persistent PostgreSQL database and `PGSSL=true` where required. Do not use Render's ephemeral filesystem as the production database. Health check: `/api/health`.
+## What's new vs V3
+- Sessions last 30 days and survive server restarts (V3 logged everyone out after 10 minutes).
+- Shared room = common pot (add money / spend) + bill splitting (who owes whom, settle up).
+- Monthly limit per room and for the personal wallet (warns, you can record anyway), per-member summary, Stats (today / week / month, 7-day chart, day by day, month picker).
+- Roles: owner / admin / member. Invite by Account ID, remove, leave, make admin, transfer ownership, delete room, edit room.
+- Delete entries (author or admin), auto-refresh every 8 seconds, JSON/CSV backup, restore personal wallet.
+- UPI: scan a payee QR and pay from a wallet, "My QR" to receive. The app never moves money; it records what you confirm.
+- Security: static file whitelist (V3 could serve the database file and server.js), login rate limit, CSP and security headers.
+
+## Deploy on Render
+1. Push this folder to GitHub (file names exactly as in the zip; `.gitignore` must start with a dot).
+2. Render: New > Web Service, Build `npm install`, Start `npm start`, health check `/api/health`.
+3. Create a PostgreSQL database, copy its Internal URL into the env var `DATABASE_URL` (add `PGSSL=false` if you use the internal URL).
+4. Keep the same database as V3: tables are compatible, old accounts and rooms carry over automatically.
+5. Free instances sleep and free databases can expire. Check your plan and download a backup every month.
 
 ## Run locally
-`npm install && npm start`, then open `http://localhost:3000`.
+`npm install && npm start` then open http://localhost:3000 (local JSON file is used when `DATABASE_URL` is not set).
 
 ## Tests
-`npm test` runs API integration tests across three isolated data rounds: registration, unique IDs, personal wallet isolation, room creation, Account ID invitation, invite acceptance, multi-room membership, transaction isolation, authorization, persistence/reload and validation.
+`npm test` (API tests: accounts, isolation, limits, rooms, split/settle, permissions, restart persistence, static whitelist, rate limit).
 
-## Notes / limitations
-This is an expense ledger, not a bank or payment processor. It does not initiate UPI payments. The first V3 release focuses on account and room foundations; QR payment capture, backup/restore UI, room deletion/ownership transfer and advanced roles are not included yet. Existing V2 room JSON is not automatically migrated; export and reconcile old records before switching live traffic. Do not overwrite the current deployment until the migration and acceptance tests pass.
+## Limits
+Expense ledger only, not a bank. Whole database is one JSON row, fine for friend groups, not thousands of users. QR scan/generate needs internet (CDN libraries). Room entries are not restorable from backup yet (personal wallet is).
